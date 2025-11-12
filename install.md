@@ -131,3 +131,184 @@ You can also create accounts in the Admin Panel (Accounts → Create). Create ch
 You’re set. Publish, run, open the Admin Panel, and enjoy!
 
 
+## Install OpenMU on Ubuntu (native, non-Docker)
+
+This guide installs and runs the all‑in‑one OpenMU server natively on Ubuntu (no Docker).
+Tested on Ubuntu 22.04/24.04. Adjust commands with sudo as needed.
+
+### Overview
+- PostgreSQL for persistence
+- .NET SDK 9 (framework‑dependent publish; run with `dotnet`)
+- Admin Panel (Blazor Server) on HTTP
+
+### 1) Install prerequisites
+Update packages:
+```bash
+sudo apt update
+```
+Install PostgreSQL:
+```bash
+sudo apt install -y postgresql postgresql-contrib
+```
+Install Microsoft package repo for .NET 9:
+- Ubuntu 24.04:
+  ```bash
+  wget https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+  sudo dpkg -i packages-microsoft-prod.deb
+  sudo apt update
+  ```
+- Ubuntu 22.04:
+  ```bash
+  wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+  sudo dpkg -i packages-microsoft-prod.deb
+  sudo apt update
+  ```
+Install .NET SDK 9:
+```bash
+sudo apt install -y dotnet-sdk-9.0
+```
+
+### 2) Prepare PostgreSQL
+Set a password for the `postgres` superuser (replace YOUR_PASSWORD):
+```bash
+sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'YOUR_PASSWORD';"
+```
+Ensure the service is running:
+```bash
+systemctl is-active --quiet postgresql || sudo systemctl start postgresql
+```
+
+Default local auth is usually password-capable out of the box (`scram-sha-256`).
+If you previously customized `pg_hba.conf`, ensure local TCP connections allow password auth for `postgres` (e.g., `scram-sha-256` or `md5`). Then restart:
+```bash
+sudo systemctl restart postgresql
+```
+
+You do not need to manually create the `openmu` database or extra roles; OpenMU initializes them on first run when connected as `postgres` admin.
+
+### 3) Get the source
+```bash
+git clone https://github.com/MUnique/OpenMU.git
+cd OpenMU
+```
+Or download and extract the ZIP instead.
+
+### 4) Configure database connection
+Option A (recommended): Set environment variables for admin connection at runtime:
+```bash
+export DB_HOST=localhost
+export DB_ADMIN_USER=postgres
+export DB_ADMIN_PW=YOUR_PASSWORD
+```
+
+Option B (alternative): Edit the first two entries in
+`src/Persistence/EntityFramework/ConnectionSettings.xml` and change only the `Password` for `User Id=postgres`.
+Leave the other users (`config`, `account`, `friend`, `guild`) unchanged.
+
+### 5) Publish the server
+Publishing includes all required web assets.
+```bash
+dotnet publish ./src/Startup/MUnique.OpenMU.Startup.csproj -c Release -o ./server
+```
+
+### 6) Run the server
+From the publish directory:
+```bash
+cd server
+# If you used env vars, ensure they’re still exported in this shell
+export DB_HOST=${DB_HOST:-localhost}
+export DB_ADMIN_USER=${DB_ADMIN_USER:-postgres}
+export DB_ADMIN_PW=${DB_ADMIN_PW:-YOUR_PASSWORD}
+
+# Auto-start servers; resolve local IP; optionally reinitialize the DB on first run
+dotnet ./MUnique.OpenMU.Startup.dll -autostart -resolveIP:local
+# Optional first-time force (re)initialization:
+# dotnet ./MUnique.OpenMU.Startup.dll -autostart -resolveIP:local -reinit
+```
+
+Notes:
+- `-autostart` starts connect/game/chat listeners automatically.
+- `-resolveIP:local` advertises a local LAN/loopback IP suitable for same host or LAN clients.
+- You can switch the initial game data version with `-version:season6|0.75|0.95d` in combination with `-reinit`, or use the Setup page in the Admin Panel.
+- The legacy `-deamon` flag is deprecated; console input can be disabled/enabled under Configuration → System in the Admin Panel.
+
+### 7) Admin Panel (web UI)
+On startup, the server prints the Admin Panel URLs (typically `http://localhost:5000`). Open it in your browser and verify servers are running. If you started without `-autostart`, use the panel to start servers.
+
+Bind to a specific URL/port (e.g., 0.0.0.0:5000) by setting:
+```bash
+export ASPNETCORE_URLS="http://0.0.0.0:5000"
+dotnet ./MUnique.OpenMU.Startup.dll -autostart -resolveIP:local
+```
+
+### 8) IP resolver options
+Choose how the advertised IP is determined (used by clients when connecting):
+- `-resolveIP:public` – detect public IP automatically (default if not specified)
+- `-resolveIP:local` – pick a local IP or fallback loopback (127.127.127.127)
+- `-resolveIP:loopback` – force loopback (127.127.127.127) for same-machine testing
+- `-resolveIP:<IPv4>` – specify a fixed IP (e.g., `-resolveIP:192.168.1.10`)
+
+Alternative env var if the flag is omitted: `RESOLVE_IP` (same values).
+
+### 9) Open firewall ports (ufw)
+If UFW is enabled, allow:
+```bash
+sudo ufw allow 80/tcp        # Admin Panel (if bound to 80)
+sudo ufw allow 5000/tcp      # Admin Panel default
+sudo ufw allow 44405:44406/tcp
+sudo ufw allow 55901:55906/tcp
+sudo ufw allow 55980/tcp
+sudo ufw reload
+```
+
+### 10) Test accounts
+Created automatically when the database is initialized. Passwords equal usernames.
+- `test0`–`test9`: level 1..90 in steps of 10
+- Season 6 only: `test300`, `test400`, `testgm`, `testgm2`, `testunlock`, `quest1`, `quest2`, `quest3`, `ancient`, `socket`
+
+Create accounts in Admin Panel (Accounts → Create). Prefer creating characters via the game client.
+
+### Optional: run as a systemd service
+Create `/etc/systemd/system/openmu.service` (adjust paths and environment):
+```ini
+[Unit]
+Description=OpenMU Server
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/OpenMU/server
+Environment=ASPNETCORE_URLS=http://0.0.0.0:5000
+Environment=DB_HOST=localhost
+Environment=DB_ADMIN_USER=postgres
+Environment=DB_ADMIN_PW=YOUR_PASSWORD
+ExecStart=/usr/bin/dotnet /opt/OpenMU/server/MUnique.OpenMU.Startup.dll -autostart -resolveIP:public
+Restart=on-failure
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target
+```
+Then:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable openmu
+sudo systemctl start openmu
+sudo systemctl status openmu
+```
+
+### Troubleshooting
+- Database authentication failed
+  - Verify `DB_ADMIN_USER`/`DB_ADMIN_PW`. Ensure `postgres` has a password: `sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '...';"`
+  - Confirm local TCP auth in `pg_hba.conf` allows password (`scram-sha-256`/`md5`), then `sudo systemctl restart postgresql`.
+- Admin Panel unreachable
+  - Check console logs for bound URLs. If binding to 0.0.0.0:5000, ensure firewall allows 5000.
+  - Try setting `ASPNETCORE_URLS="http://0.0.0.0:5000"` before starting.
+- Ports already in use
+  - Free the ports or change settings in Admin Panel → Configuration → System, then restart affected servers.
+- Same-machine client
+  - Use `-resolveIP:loopback` to advertise 127.127.127.127 (the client blocks 127.0.0.1).
+
+You’re done. Publish, run, open the Admin Panel, and enjoy!
+
